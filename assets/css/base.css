@@ -1,0 +1,77 @@
+/* Layout and structure. Colors and effects live in theme.css. */
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+#brand {
+    flex: 0 0 auto;
+    text-align: center;
+    padding: 8px 10px;
+}
+
+#brand img {
+    width: 28px;
+    height: 28px;
+    margin-right: 8px;
+    border-radius: 50%;
+    vertical-align: middle;
+}
+
+#brand b {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: .14em;
+    vertical-align: middle;
+}
+
+#wrap {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 16px 18px;
+}
+
+#state { font-size: 22px; font-weight: 700; margin: 0 0 6px; }
+
+#det { font-size: 13px; margin: 0 0 4px; }
+#det b { font-weight: 600; }
+
+#cache { font-size: 12px; margin: 0 0 10px; min-height: 14px; }
+
+#out {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    font: 12px/1.45 Consolas, monospace;
+    border-radius: 5px;
+    padding: 10px 12px;
+}
+
+#out div { white-space: pre-wrap; }
+
+#toasts {
+    position: fixed;
+    right: 12px;
+    bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    z-index: 10;
+}
+
+.toast {
+    margin-top: 6px;
+    padding: 8px 12px;
+    border-radius: 5px;
+    font-size: 13px;
+    max-width: 60vw;
+}

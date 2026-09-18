@@ -1,0 +1,62 @@
+/* Dark cyberpunk theme. Native CSS only: gradients, borders and shadows --
+   no web fonts, no external assets, no heavy GPU effects. */
+
+:root {
+    --bg: #0b0d10;
+    --panel: #11151b;
+    --panel-2: #0e1116;
+    --line: #1e2732;
+    --line-2: #26303d;
+    --text: #c8ced8;
+    --muted: #8b95a3;
+    --dim: #5c6672;
+    --title: #e6ebf2;
+    --ok: #7fd0a0;
+    --bad: #d08a7f;
+    --warn: #d8c07f;
+    --accent: #59d7ff;
+}
+
+html, body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+#brand {
+    background: linear-gradient(180deg, #121823, var(--panel-2));
+    border-bottom: 1px solid var(--line);
+}
+
+#brand b { color: var(--title); }
+
+#state { color: var(--title); }
+
+#det { color: var(--muted); }
+#det b { color: var(--text); }
+
+#cache { color: var(--dim); }
+#cache.cacheok { color: var(--ok); }
+
+#out {
+    background: linear-gradient(180deg, #0f131a, var(--panel));
+    border: 1px solid var(--line);
+    color: #c9d4e4;
+    box-shadow: inset 0 0 0 1px rgba(89, 215, 255, .05);
+}
+
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+.warn { color: var(--warn); }
+
+.toast {
+    background: rgba(17, 21, 27, .96);
+    border: 1px solid var(--line-2);
+    color: var(--text);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+    transition: opacity .4s ease;
+}
+
+.toast-ok { border-color: var(--ok); }
+.toast-bad { border-color: var(--bad); }
+.toast-out { opacity: 0; }

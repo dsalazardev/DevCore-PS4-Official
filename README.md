@@ -13,13 +13,16 @@ The chain is selected automatically from the browser's User-Agent.
 
 | Firmware | Chain | Tested on hardware |
 | -------- | ----- | ------------------ |
-| 11.00 | lapse | Yes |
-| 11.50 | lapse | Yes |
-| 12.00 | lapse | Yes |
-| 12.02 | lapse | Yes |
-| 12.50 | poops | Yes |
-| 12.52 | poops | Yes |
-| 13.00 | poops | Yes |
+| 11.00 | lapse | Yes (proven) |
+| 11.50 | lapse | Yes (proven) |
+| 12.00 | lapse | No - offsets verified vs `kernel_1202.elf`, UNTESTED on hardware |
+| 12.02 | lapse | No - shares 12.00's kernel row |
+| 12.50 | poops | No - asserted table, not independently verified |
+| 12.52 | poops | No - shares 12.50's row |
+| 13.00 | poops | Yes (proven) |
+
+The `fw_status` field in `ps4_offsets.js` is the source of truth for each
+block's proof state; update this table only when hardware evidence changes.
 
 ## Usage
 

